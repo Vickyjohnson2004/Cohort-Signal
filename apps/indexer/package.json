@@ -1,0 +1,25 @@
+{
+  "name": "@cohortsignal/indexer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsx src/main.ts live",
+    "start": "node dist/main.js live",
+    "bootstrap": "tsx src/main.ts bootstrap",
+    "prices": "tsx src/main.ts prices",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@cohortsignal/core": "workspace:*",
+    "dotenv": "^16.4.5",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.10",
+    "vitest": "^2.1.4"
+  }
+}
