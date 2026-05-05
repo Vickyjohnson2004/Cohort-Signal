@@ -1,0 +1,34 @@
+node_modules/
+dist/
+.tsbuildinfo
+*.tsbuildinfo
+coverage/
+
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Editor
+.vscode/
+.idea/
+
+# Bootstrap intermediate data (large files we never want to commit)
+data/
+dumps/
+*.csv
+*.csv.gz
+*.tsv
+*.tsv.gz
+
+# Build artifacts
+.turbo/

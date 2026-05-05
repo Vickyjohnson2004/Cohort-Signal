@@ -1,0 +1,32 @@
+{
+  "name": "cohortsignal",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CohortSignal - Bitcoin LTH/STH supply regime intelligence MCP tool for the Context Protocol marketplace.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@9.12.0",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "lint": "pnpm -r lint",
+    "dev:mcp": "pnpm --filter @cohortsignal/mcp-server dev",
+    "dev:indexer": "pnpm --filter @cohortsignal/indexer dev",
+    "migrate": "pnpm --filter @cohortsignal/core migrate",
+    "bootstrap": "pnpm --filter @cohortsignal/bootstrap start"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "tsx": "^4.19.2",
+    "@types/node": "^22.9.0",
+    "vitest": "^2.1.4"
+  }
+}
