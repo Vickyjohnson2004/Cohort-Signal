@@ -14,9 +14,13 @@ providers = ["node"]
 NIXPACKS_NODE_VERSION = "20"
 
 [phases.install]
+# We need devDependencies (typescript, @types/*) during the build phase, so
+# we explicitly pass --prod=false. Railway sets NODE_ENV=production during
+# the build, which would otherwise cause pnpm to skip devDependencies and
+# leave `tsc` missing when railway.json's buildCommand runs.
 cmds = [
   "npm install -g corepack@latest",
   "corepack enable",
   "corepack prepare pnpm@9.12.0 --activate",
-  "pnpm install --frozen-lockfile",
+  "pnpm install --frozen-lockfile --prod=false",
 ]
