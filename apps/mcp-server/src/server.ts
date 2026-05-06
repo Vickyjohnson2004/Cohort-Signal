@@ -44,11 +44,21 @@ import { callTool } from "./handlers.js";
 
 const CONTEXT_AUTH_ENABLED = process.env.CONTEXT_AUTH_ENABLED !== "false";
 const PORT = Number(process.env.PORT ?? 3000);
+// Bind to all interfaces. Railway's reverse proxy talks to the container on
+// 0.0.0.0:$PORT; localhost-only binding would not be reachable.
+const HOST = process.env.HOST ?? "0.0.0.0";
+
+console.log(`[cohortsignal] boot: NODE_ENV=${process.env.NODE_ENV ?? "?"} PORT=${PORT} HOST=${HOST} contextAuth=${CONTEXT_AUTH_ENABLED}`);
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
-const pool = await getPoolAsync();
+console.log(`[cohortsignal] boot: connecting to Postgres...`);
+const pool = await getPoolAsync().catch((err) => {
+  console.error(`[cohortsignal] boot FAILED at getPoolAsync:`, err);
+  process.exit(1);
+});
+console.log(`[cohortsignal] boot: Postgres connected.`);
 const service = new PostgresCohortService(pool);
 
 const server = new Server(
@@ -66,10 +76,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 const transports: Record<string, StreamableHTTPServerTransport> = {};
-const verifyContextAuth = createContextMiddleware();
-const mcpAuthMiddleware: RequestHandler = CONTEXT_AUTH_ENABLED
-  ? verifyContextAuth
-  : (_req, _res, next) => next();
+let verifyContextAuth: RequestHandler | null = null;
+try {
+  verifyContextAuth = createContextMiddleware();
+  console.log(`[cohortsignal] boot: createContextMiddleware initialized.`);
+} catch (err) {
+  console.error(`[cohortsignal] boot WARNING: createContextMiddleware threw:`, err);
+}
+const mcpAuthMiddleware: RequestHandler =
+  CONTEXT_AUTH_ENABLED && verifyContextAuth
+    ? verifyContextAuth
+    : (_req, _res, next) => next();
 
 // ----- Public health endpoint (open, used by load balancers) -----
 app.get("/health", async (_req: Request, res: Response) => {
@@ -139,13 +156,17 @@ app.delete("/mcp", mcpAuthMiddleware, async (req: Request, res: Response) => {
   }
 });
 
-const httpServer = app.listen(PORT, () => {
+const httpServer = app.listen(PORT, HOST, () => {
   console.log(
-    `[cohortsignal] mcp server listening on :${PORT}${
+    `[cohortsignal] mcp server listening on http://${HOST}:${PORT}${
       CONTEXT_AUTH_ENABLED ? " (Context auth ENABLED)" : " (Context auth DISABLED — local only!)"
     }`,
   );
   console.log(`[cohortsignal] tools: ${TOOLS.map((t) => t.name).join(", ")}`);
+});
+
+httpServer.on("error", (err) => {
+  console.error(`[cohortsignal] HTTP server error:`, err);
 });
 
 const shutdown = async (signal: string) => {
