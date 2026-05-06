@@ -8,9 +8,27 @@ import {
 import { finalizeHodlWaves } from "../cohort/bands.js";
 
 /**
+ * Optional fields written by the rebuild job. Stored in dedicated columns
+ * added in migration 0002. We accept them as an intersection-extension of
+ * CohortSnapshot so the canonical shared type doesn't need to know about
+ * write-time concerns.
+ */
+export interface SnapshotExtras {
+  lthNetPositionChangeBtc7d?: number | null;
+  lthNetPositionChangeBtc30d?: number | null;
+  lthNetPositionChangeBtc90d?: number | null;
+  lthSopr30dMean?: number | null;
+  regime?: "accumulation" | "equilibrium" | "distribution" | null;
+}
+
+/**
  * Upsert a single snapshot. Idempotent on (snapshot_date, cohort_boundary_days).
  */
-export async function upsertSnapshot(pool: Pool, snap: CohortSnapshot): Promise<void> {
+export async function upsertSnapshot(
+  pool: Pool | import("pg").PoolClient,
+  snap: CohortSnapshot,
+  extras: SnapshotExtras = {},
+): Promise<void> {
   const cols = [
     "snapshot_date",
     "cohort_boundary_days",
@@ -24,6 +42,11 @@ export async function upsertSnapshot(pool: Pool, snap: CohortSnapshot): Promise<
     ...HODL_AGE_BANDS.map((b) => `hodl_waves_pct_${b}`),
     "lth_sopr",
     "lth_net_position_change_btc_1d",
+    "lth_net_position_change_btc_7d",
+    "lth_net_position_change_btc_30d",
+    "lth_net_position_change_btc_90d",
+    "lth_sopr_30d_mean",
+    "regime",
     "provisional",
     "methodology_version",
     "computed_at",
@@ -42,6 +65,11 @@ export async function upsertSnapshot(pool: Pool, snap: CohortSnapshot): Promise<
     ...HODL_AGE_BANDS.map((b) => snap.hodlWaves.pctOfSupply[b] ?? 0),
     snap.lthSopr,
     snap.lthNetPositionChangeBtc1d,
+    extras.lthNetPositionChangeBtc7d ?? null,
+    extras.lthNetPositionChangeBtc30d ?? null,
+    extras.lthNetPositionChangeBtc90d ?? null,
+    extras.lthSopr30dMean ?? null,
+    extras.regime ?? null,
     snap.provisional,
     snap.methodologyVersion,
     snap.computedAt,
@@ -58,6 +86,94 @@ export async function upsertSnapshot(pool: Pool, snap: CohortSnapshot): Promise<
      ON CONFLICT (snapshot_date, cohort_boundary_days) DO UPDATE SET ${updates};`,
     values,
   );
+}
+
+/**
+ * Bulk-upsert many snapshots in one multi-row INSERT statement per chunk.
+ *
+ * Each row contributes ~28 parameters; we chunk at 1000 rows = ~28k params,
+ * which stays under Postgres' 32k-parameter ceiling. A 3000-row rebuild
+ * therefore makes 3 round-trips, instead of 3000 with the old serial
+ * variant — ~1000x faster against a remote Neon instance.
+ */
+export async function bulkUpsertSnapshots(
+  pool: Pool | import("pg").PoolClient,
+  rows: Array<{ snap: CohortSnapshot; extras?: SnapshotExtras }>,
+): Promise<void> {
+  if (rows.length === 0) return;
+  const cols = [
+    "snapshot_date",
+    "cohort_boundary_days",
+    "block_height",
+    "lth_supply_btc",
+    "sth_supply_btc",
+    "circulating_supply_btc",
+    "lth_supply_pct_of_circulating",
+    "sth_supply_pct_of_circulating",
+    ...HODL_AGE_BANDS.map((b) => `hodl_waves_btc_${b}`),
+    ...HODL_AGE_BANDS.map((b) => `hodl_waves_pct_${b}`),
+    "lth_sopr",
+    "lth_net_position_change_btc_1d",
+    "lth_net_position_change_btc_7d",
+    "lth_net_position_change_btc_30d",
+    "lth_net_position_change_btc_90d",
+    "lth_sopr_30d_mean",
+    "regime",
+    "provisional",
+    "methodology_version",
+    "computed_at",
+  ];
+  const rowParamsPerRow = cols.length;
+  const CHUNK = Math.max(1, Math.floor(30_000 / rowParamsPerRow));
+
+  const updates = cols
+    .filter((c) => c !== "snapshot_date" && c !== "cohort_boundary_days")
+    .map((c) => `${c} = EXCLUDED.${c}`)
+    .join(", ");
+
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const slice = rows.slice(i, i + CHUNK);
+    const params: unknown[] = [];
+    const placeholderRows: string[] = [];
+    let p = 1;
+    for (const { snap, extras } of slice) {
+      const ex = extras ?? {};
+      const values: unknown[] = [
+        snap.date,
+        snap.cohortBoundaryDays,
+        snap.blockHeight,
+        snap.lthSupplyBtc,
+        snap.sthSupplyBtc,
+        snap.circulatingSupplyBtc,
+        snap.lthSupplyPctOfCirculating,
+        snap.sthSupplyPctOfCirculating,
+        ...HODL_AGE_BANDS.map((b) => snap.hodlWaves.btc[b] ?? 0),
+        ...HODL_AGE_BANDS.map((b) => snap.hodlWaves.pctOfSupply[b] ?? 0),
+        snap.lthSopr,
+        snap.lthNetPositionChangeBtc1d,
+        ex.lthNetPositionChangeBtc7d ?? null,
+        ex.lthNetPositionChangeBtc30d ?? null,
+        ex.lthNetPositionChangeBtc90d ?? null,
+        ex.lthSopr30dMean ?? null,
+        ex.regime ?? null,
+        snap.provisional,
+        snap.methodologyVersion,
+        snap.computedAt,
+      ];
+      const placeholders: string[] = [];
+      for (const v of values) {
+        placeholders.push(`$${p++}`);
+        params.push(v);
+      }
+      placeholderRows.push(`(${placeholders.join(", ")})`);
+    }
+    const sql = `
+      INSERT INTO cohort_snapshots (${cols.join(", ")})
+      VALUES ${placeholderRows.join(", ")}
+      ON CONFLICT (snapshot_date, cohort_boundary_days) DO UPDATE SET ${updates};
+    `;
+    await pool.query(sql, params);
+  }
 }
 
 /**

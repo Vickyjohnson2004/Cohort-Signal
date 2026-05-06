@@ -9,13 +9,15 @@
     "typecheck": "tsc --noEmit",
     "dev": "tsx src/main.ts live",
     "start": "node dist/main.js live",
-    "bootstrap": "tsx src/main.ts bootstrap",
+    "bq-bootstrap": "tsx src/main.ts bq-bootstrap",
+    "rebuild": "tsx src/main.ts rebuild",
     "prices": "tsx src/main.ts prices",
-    "test": "vitest run"
+    "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
     "@cohortsignal/core": "workspace:*",
     "dotenv": "^16.4.5",
+    "google-auth-library": "^9.15.0",
     "pg": "^8.13.1"
   },
   "devDependencies": {

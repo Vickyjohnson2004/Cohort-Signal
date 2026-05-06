@@ -84,10 +84,11 @@ A free LLM cannot give you accurate, reproducible LTH/STH cohort numbers. There 
 cohortsignal/
 ├── packages/
 │   └── core/                      # shared cohort logic (used by both apps)
-│       ├── src/cohort/            # bands, rolling stats, regime classifier, deterministic narrative
-│       ├── src/db/                # Postgres pool, migrations, snapshot read/write
-│       ├── src/price/             # CoinGecko price client (used for live-edge SOPR)
-│       ├── src/rpc/               # Bitcoin Core RPC + Esplora fallback
+│       ├── src/cohort/            # bands, rolling stats, regime classifier, narrative, deterministic rebuilder
+│       ├── src/bigquery/          # minimal BigQuery REST client (no heavy SDK)
+│       ├── src/db/                # Postgres pool, migrations, snapshot read/write, flow tables
+│       ├── src/price/             # CryptoCompare + CoinGecko price clients
+│       ├── src/rpc/               # Bitcoin Core RPC (GetBlock) + Esplora fallback
 │       ├── src/schemas/           # canonical TS types and HODL waves bands
 │       └── src/util/              # date, circulating-supply formula, Redis, errors
 │
@@ -98,13 +99,12 @@ cohortsignal/
 │   │   ├── src/handlers.ts        # tool dispatcher with structured error returns
 │   │   └── src/service.ts         # Postgres-backed cohort regime view builder
 │   │
-│   └── indexer/                   # the worker (bootstrap + live-edge)
-│       ├── src/aggregator.ts      # deterministic in-memory UTXO-age aggregator
-│       ├── src/bigquery.ts        # streams daily aggregates from BigQuery
-│       ├── src/bootstrap.ts       # one-time historical backfill 2018-now
-│       ├── src/live.ts            # daily incremental + provisional projection
-│       ├── src/prices.ts          # CoinGecko OHLC backfill (for live-edge SOPR)
-│       └── src/main.ts            # CLI entrypoint (bootstrap | live | prices)
+│   └── indexer/                   # the worker (bootstrap + rebuild + live-edge)
+│       ├── src/bigquery.ts        # one-time BigQuery extract: utxo_daily_creations, utxo_daily_spends_by_creation
+│       ├── src/rebuildSnapshots.ts # deterministic replay: flow tables -> cohort_snapshots
+│       ├── src/live.ts            # provisional today-snapshot projection from chain tip
+│       ├── src/prices.ts          # CryptoCompare OHLC backfill (for LTH-SOPR)
+│       └── src/main.ts            # CLI entrypoint (bq-bootstrap | rebuild | prices | live)
 │
 ├── package.json                   # pnpm workspace root
 ├── pnpm-workspace.yaml
@@ -145,16 +145,36 @@ pnpm test
 ### Running locally
 
 ```bash
+# --- One-time historical bootstrap (run once on a fresh DB) ---
+
+# 1) Fetch the BigQuery flow tables (utxo_daily_creations + utxo_daily_spends_by_creation)
+#    Cost: ~613 GB scan, ~$3 over the 1 TB free tier. Time: ~30-50 min.
+#    Storage required in Postgres: ~700 MB (mostly the spends table). The Neon
+#    Free tier (0.5 GB) will run out partway through; upgrade to Launch ($5/mo,
+#    10 GB) before running this.
+pnpm --filter @cohortsignal/indexer bq-bootstrap -- --from 2018-01-01
+
+# If the bootstrap is interrupted (e.g. transient network blip), resume with:
+#   --spends-only --from <next-day-after-last-loaded-spend-date>
+# The bigquery-creations phase is cheap and idempotent and can be re-run safely.
+pnpm --filter @cohortsignal/indexer bq-bootstrap -- --from 2024-06-01 --spends-only
+
+# 2) Backfill BTC daily prices from CryptoCompare (free, ~30 sec)
+pnpm --filter @cohortsignal/indexer prices -- --from 2018-01-01
+
+# 3) Replay the deterministic snapshot rebuilder (no external network calls).
+#    Computes ~3000 daily cohort_snapshots + regime_change_events. Time: ~1-2 min.
+pnpm --filter @cohortsignal/indexer rebuild
+
+# --- Daily ongoing ---
+
 # Run the MCP server (with Context auth disabled for local dev only)
 CONTEXT_AUTH_ENABLED=false pnpm dev:mcp
-# -> http://localhost:3000/health
-# -> POST http://localhost:3000/mcp
+# -> http://localhost:3017/health
+# -> POST http://localhost:3017/mcp
 
-# In another shell, run the indexer in live mode (assumes bootstrap has been done)
+# Run the live-edge loop (refreshes "today" snapshot every 5 min from chain tip)
 pnpm dev:indexer
-
-# Or run a backfill for a specific date range
-pnpm --filter @cohortsignal/indexer start bootstrap --from 2024-01-01 --to 2024-01-31
 ```
 
 `CONTEXT_AUTH_ENABLED=false` MUST NOT be used in production — it disables the Context Protocol auth middleware. The default is `true`.

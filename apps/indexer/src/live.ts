@@ -2,25 +2,27 @@
  * Live-edge indexer.
  *
  * Strategy:
- *   1) Every INDEXER_POLL_INTERVAL_MS (default 5 min):
- *      a) Find current chain-tip height via Esplora (no auth).
- *      b) If yesterday's Blockchair dump is now available and we don't have
- *         yesterday's final snapshot, run a one-day bootstrap pass. This
- *         advances our final (non-provisional) frontier by 1 day.
- *      c) Compute a provisional "today" snapshot:
- *         - Start from yesterday's final snapshot (LTH/STH supply, HODL waves).
- *         - Add today's coinbase issuance to STH (under_1m band).
- *         - Resolve LTH-SOPR for today's blocks by streaming Esplora for new
- *           blocks since last_block_processed and aggregating spends with
- *           prevout age >= cohortBoundaryDays.
- *         - Mark snapshot as provisional=true, blockHeight = chain tip.
+ *   - The historical (final) frontier is advanced by the BigQuery bootstrap
+ *     + rebuild pipeline (one-shot: ~613 GB scan, ~30 min run). After that
+ *     pipeline, cohort_snapshots covers every UTC day in [2018-01-01,
+ *     yesterday] with provisional=false.
  *
- * The provisional path NEVER mutates the long-running CohortAggregator
- * state — we materialize a one-shot derived snapshot for "today" each
- * cycle and overwrite it in Postgres. This means:
- *   - We never drift out of the deterministic from-Blockchair state.
- *   - The provisional flag is honest: yesterday is final; today is the
- *     best estimate from RPC + yesterday's authoritative state.
+ *   - This live loop advances the *provisional* "today" snapshot by:
+ *       a) Reading yesterday's final snapshot (the authoritative LTH/STH
+ *          supply and HODL waves).
+ *       b) Computing today's coinbase issuance from chain-tip height vs
+ *          yesterday's snapshot height. New issuance is under_1m STH.
+ *       c) Marking the snapshot as provisional=true and writing it.
+ *
+ *   - LTH-SOPR for today is left null in the provisional snapshot. Once the
+ *     next BigQuery refresh (or RPC refresh) lands "today" as a final day,
+ *     LTH-SOPR is computed deterministically from the rebuild engine.
+ *
+ * The provisional snapshot NEVER mutates the deterministic historical
+ * state. So if BigQuery + the rebuild engine are correct on the historical
+ * range, today's provisional snapshot can drift by at most ~1 day's worth
+ * of LTH/STH movement, which is vanishingly small relative to the 14M+
+ * BTC LTH cohort.
  */
 
 import {
@@ -40,10 +42,8 @@ import {
   upsertSnapshot,
 } from "@cohortsignal/core/db";
 import { EsploraClient } from "@cohortsignal/core/rpc";
-import { runBootstrap } from "./bootstrap.js";
 
 const INDEXER_VERSION = `cohortsignal-indexer-${CORE_VERSION}`;
-const SAT_PER_BTC = 100_000_000;
 
 interface LiveOptions {
   cohortBoundaryDays?: number;
@@ -81,28 +81,12 @@ async function tickOnce(args: {
     return;
   }
 
-  const latest = await getLatestSnapshot(pool, cohortBoundaryDays, false);
   const todayUtc = new Date().toISOString().slice(0, 10);
-  const yesterdayUtc = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+  void todayUtc;
 
-  // Step 1: Advance final frontier by 1 day if yesterday's dump is now available.
-  if (!latest || latest.date < yesterdayUtc) {
-    const fromDate = latest ? nextDateOf(latest.date) : "2018-01-01";
-    if (fromDate <= yesterdayUtc) {
-      console.log(`[live] advancing final frontier ${fromDate} -> ${yesterdayUtc}`);
-      try {
-        await runBootstrap({
-          startDate: fromDate,
-          endDate: yesterdayUtc,
-          cohortBoundaryDays,
-        });
-      } catch (err) {
-        console.warn("[live] frontier advance failed (dumps may not be published yet):", (err as Error).message);
-      }
-    }
-  }
-
-  // Step 2: Build provisional today snapshot from latest non-provisional.
+  // Build provisional today snapshot from latest non-provisional. The
+  // historical frontier is advanced separately by the BigQuery + rebuild
+  // pipeline, run on a daily cron (or manually).
   const base = await getLatestSnapshot(pool, cohortBoundaryDays, false);
   if (!base) {
     console.warn("[live] no final snapshot yet; provisional snapshot skipped");
@@ -117,10 +101,11 @@ async function tickOnce(args: {
     return;
   }
 
+  const todayDate = new Date().toISOString().slice(0, 10);
   const provisional = projectForwardToToday({
     base,
     cohortBoundaryDays,
-    todayDate: todayUtc,
+    todayDate,
     chainTipHeight: tipHeight,
   });
 
@@ -195,12 +180,6 @@ function projectForwardToToday(args: {
     methodologyVersion: METHODOLOGY_VERSION,
     computedAt: new Date().toISOString(),
   };
-}
-
-function nextDateOf(iso: string): string {
-  const d = new Date(`${iso}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + 1);
-  return d.toISOString().slice(0, 10);
 }
 
 export { projectForwardToToday };

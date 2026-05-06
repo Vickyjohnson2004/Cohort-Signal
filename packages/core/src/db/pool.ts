@@ -2,6 +2,15 @@ import pg from "pg";
 import dns from "node:dns/promises";
 
 /**
+ * Override pg's default DATE (OID 1082) parser. Default behaviour parses
+ * 'YYYY-MM-DD' through `new Date(...)` which interprets it as midnight
+ * LOCAL time, then `.toISOString().slice(0,10)` shifts it by one day on
+ * any host whose timezone is east of UTC. We don't want that; we want the
+ * raw string. This must run before any pool is constructed.
+ */
+pg.types.setTypeParser(1082, (val: string) => val);
+
+/**
  * Build a Postgres pool that works reliably from networks where Node's
  * Happy-Eyeballs connector struggles with mixed IPv4/IPv6 results.
  *

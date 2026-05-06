@@ -68,11 +68,16 @@ lthNetPositionChangeBtcNdAvg = mean of lthNetPositionChangeBtc1d over [D - N + 1
 For every Bitcoin spend where the spent UTXO's age was `>= cohortBoundaryDays` days at the time of spend:
 
 ```
-LTH-SOPR(D) = sum(spend_value_usd_at_spend) / sum(spend_value_usd_at_creation)
-              over all qualifying spends on UTC date D
+LTH-SOPR(D) = sum(spendBtc[d, c] * price[d])
+              / sum(spendBtc[d, c] * price[c])
+              over all (creation_date c, spend_date d=D) where d - c >= cohortBoundaryDays
 ```
 
-Returns `null` for dates with no qualifying spends. USD values come from BigQuery's `inputs` table, which carries `value_usd` and `spending_value_usd` joined to a daily price curve.
+Where:
+- `spendBtc[d, c]` comes from `utxo_daily_spends_by_creation`, derived from BigQuery's `crypto_bitcoin.inputs` JOIN `crypto_bitcoin.outputs` on `(transaction_hash, index)`.
+- `price[d]` comes from our `btc_price_daily` table, sourced from CryptoCompare's free public histoday endpoint (a multi-exchange aggregate). Absolute USD level is therefore exchange-agnostic; the LTH-SOPR ratio is internally consistent because the same series sets both numerator and denominator.
+
+Returns `null` for dates with no qualifying spends or where required prices are missing.
 
 Status thresholds:
 - `above_one`: SOPR > 1.005

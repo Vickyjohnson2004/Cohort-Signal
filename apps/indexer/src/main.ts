@@ -2,12 +2,26 @@
  * CLI entry point for the CohortSignal indexer.
  *
  * Usage:
- *   indexer bootstrap [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--cohort 155] [--resume]
- *   indexer live      [--cohort 155]
- *   indexer prices    [--from YYYY-MM-DD] [--to YYYY-MM-DD]
+ *   indexer bq-bootstrap [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--creations-only] [--spends-only]
+ *      Run the BigQuery extracts that populate utxo_daily_creations and
+ *      utxo_daily_spends_by_creation. Idempotent. The full historical run
+ *      bills ~613 GB; subsequent runs only bill the incremental window.
+ *
+ *   indexer rebuild [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--cohort 155]
+ *      Replay the deterministic snapshot rebuilder over the flow tables
+ *      and write the resulting cohort_snapshots + regime_change_events.
+ *      Idempotent. Run after bq-bootstrap and after prices.
+ *
+ *   indexer prices [--from YYYY-MM-DD] [--to YYYY-MM-DD]
+ *      Backfill BTC daily prices from CoinGecko into btc_price_daily.
+ *      Required for LTH-SOPR computation in `rebuild`.
+ *
+ *   indexer live [--cohort 155]
+ *      Run the live-edge loop: every 5 minutes, project today's
+ *      provisional snapshot from yesterday's authoritative state plus the
+ *      current chain-tip's coinbase issuance.
  */
 
-// Load env from monorepo root.
 import { config as loadDotenv } from "dotenv";
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
@@ -22,7 +36,8 @@ for (const candidate of [
   }
 }
 
-import { runBootstrap, type BootstrapProgressInfo } from "./bootstrap.js";
+import { bigQueryBootstrap } from "./bigquery.js";
+import { rebuildAllSnapshots } from "./rebuildSnapshots.js";
 import { runLiveLoop } from "./live.js";
 import { backfillPrices } from "./prices.js";
 
@@ -31,8 +46,8 @@ interface Args {
   from?: string;
   to?: string;
   cohort?: number;
-  resume?: boolean;
-  forceRestart?: boolean;
+  creationsOnly?: boolean;
+  spendsOnly?: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -50,19 +65,17 @@ function parseArgs(argv: string[]): Args {
     } else if (a === "--cohort" && next) {
       args.cohort = Number(next);
       i++;
-    } else if (a === "--resume") {
-      args.resume = true;
-    } else if (a === "--force-restart") {
-      args.forceRestart = true;
+    } else if (a === "--creations-only") {
+      args.creationsOnly = true;
+    } else if (a === "--spends-only") {
+      args.spendsOnly = true;
     }
   }
   return args;
 }
 
-function defaultEndDate(): string {
-  // Yesterday in UTC. Today's Blockchair dump is typically not yet published.
-  const d = new Date(Date.now() - 86_400_000);
-  return d.toISOString().slice(0, 10);
+function todayUtc(): string {
+  return new Date().toISOString().slice(0, 10);
 }
 
 async function main(): Promise<void> {
@@ -70,36 +83,51 @@ async function main(): Promise<void> {
   const args = parseArgs(argv);
 
   switch (args.cmd) {
-    case "bootstrap": {
-      const startDate = args.from ?? "2018-01-01";
-      const endDate = args.to ?? defaultEndDate();
-      const cohortBoundaryDays = args.cohort ?? 155;
-      const resume = !args.forceRestart && Boolean(args.resume);
+    case "bq-bootstrap": {
+      const fromDate = args.from ?? "2018-01-01";
+      const toDate = args.to ?? todayUtc();
       console.log(
-        `[indexer] bootstrap ${startDate}..${endDate} cohortBoundaryDays=${cohortBoundaryDays} resume=${resume}`,
+        `[indexer] bq-bootstrap ${fromDate}..${toDate} ` +
+          `creationsOnly=${Boolean(args.creationsOnly)} spendsOnly=${Boolean(args.spendsOnly)}`,
       );
-      const startTs = Date.now();
-      await runBootstrap({
-        startDate,
-        endDate,
-        cohortBoundaryDays,
-        resume,
-        onProgress: (info: BootstrapProgressInfo) => {
-          const elapsedTotal = Math.floor((Date.now() - startTs) / 1000);
-          const eta =
-            info.daysRemaining > 0 && info.elapsedMs > 0
-              ? Math.floor((info.elapsedMs / 1000) * info.daysRemaining)
-              : 0;
+      const t0 = Date.now();
+      const result = await bigQueryBootstrap({
+        fromDate,
+        toDate,
+        creationsOnly: args.creationsOnly,
+        spendsOnly: args.spendsOnly,
+        onProgress: (info) => {
           console.log(
-            `[bootstrap] ${info.date} blk=${info.blockHeight} ` +
-              `LTH=${info.lthSupplyBtc.toFixed(0)} STH=${info.sthSupplyBtc.toFixed(0)} ` +
-              `unspent=${info.totalUnspentBtc.toFixed(0)} BTC tracked=${info.trackedBlocks} ` +
-              `dt=${(info.elapsedMs / 1000).toFixed(1)}s remaining=${info.daysRemaining}d ` +
-              `total=${elapsedTotal}s eta=${eta}s`,
+            `[bq] phase=${info.phase} rowsSeen=${info.rowsSeen} rowsWritten=${info.rowsWritten} pageBytes=${(info.pageBytes / 1e9).toFixed(2)}GB`,
           );
         },
       });
-      console.log(`[indexer] bootstrap done in ${Math.floor((Date.now() - startTs) / 1000)}s`);
+      console.log(
+        `[indexer] bq-bootstrap done in ${Math.floor((Date.now() - t0) / 1000)}s ` +
+          `creations=${result.creationsRows} spends=${result.spendsRows} ` +
+          `bytesBilled=${(result.bytesBilled / 1e9).toFixed(1)}GB`,
+      );
+      process.exit(0);
+      return;
+    }
+    case "rebuild": {
+      const cohortBoundaryDays = args.cohort ?? 155;
+      console.log(`[indexer] rebuild from=${args.from ?? "<earliest>"} to=${args.to ?? "<today>"} cohort=${cohortBoundaryDays}`);
+      const t0 = Date.now();
+      const result = await rebuildAllSnapshots({
+        cohortBoundaryDays,
+        fromDate: args.from,
+        toDate: args.to,
+        onProgress: (info) => {
+          console.log(
+            `[rebuild] ${info.date} LTH=${info.lthBtc.toFixed(0)} STH=${info.sthBtc.toFixed(0)} days=${info.daysWritten}`,
+          );
+        },
+      });
+      console.log(
+        `[indexer] rebuild done in ${Math.floor((Date.now() - t0) / 1000)}s ` +
+          `daysWritten=${result.daysWritten} regimeChanges=${result.regimeChanges}`,
+      );
       process.exit(0);
       return;
     }
@@ -116,7 +144,9 @@ async function main(): Promise<void> {
     }
     default:
       console.error(`[indexer] unknown command: ${args.cmd}`);
-      console.error("Usage: indexer {bootstrap|live|prices} [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--cohort 155]");
+      console.error(
+        "Usage: indexer {bq-bootstrap|rebuild|prices|live} [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--cohort 155] [--creations-only|--spends-only]",
+      );
       process.exit(1);
   }
 }

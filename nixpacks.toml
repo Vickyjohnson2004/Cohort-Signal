@@ -1,0 +1,22 @@
+# Nixpacks build configuration for Railway.
+#
+# This config powers both Railway services (apps/mcp-server and
+# apps/indexer). Each service has its own apps/<service>/railway.json with
+# the deploy.startCommand and the buildCommand that selects which
+# workspace package to build.
+#
+# We use corepack to pin pnpm 9.12.0 (matches packageManager in
+# package.json) so the build environment exactly matches local dev.
+
+providers = ["node"]
+
+[variables]
+NIXPACKS_NODE_VERSION = "20"
+
+[phases.install]
+cmds = [
+  "npm install -g corepack@latest",
+  "corepack enable",
+  "corepack prepare pnpm@9.12.0 --activate",
+  "pnpm install --frozen-lockfile",
+]

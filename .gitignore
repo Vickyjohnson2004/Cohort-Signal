@@ -8,6 +8,12 @@ coverage/
 .env.*
 !.env.example
 
+# GCP service account keys — never commit
+gcp-key.json
+gcp-key-*.json
+*-service-account.json
+.secrets/
+
 # OS
 .DS_Store
 Thumbs.db

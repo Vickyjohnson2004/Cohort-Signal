@@ -9,7 +9,7 @@
     "typecheck": "tsc --noEmit",
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js",
-    "test": "vitest run"
+    "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
     "@cohortsignal/core": "workspace:*",
@@ -22,6 +22,7 @@
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
-    "@types/pg": "^8.11.10"
+    "@types/pg": "^8.11.10",
+    "vitest": "^2.1.4"
   }
 }
