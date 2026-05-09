@@ -4,7 +4,7 @@ This file is the **source of truth for any new Cursor / Codex / Claude
 session** working on this repository. Read it first; treat its contents as
 context to avoid re-discovering what's been built.
 
-> Last updated: 2026-05-09.
+> Last updated: 2026-05-09 (Optimization skill phase 6 — fixes shipped).
 
 ---
 
@@ -259,6 +259,18 @@ HODL bands match Glassnode dashboard exactly (`under_1m`, `1m_3m`, `3m_6m`, `6m_
 - **Run the optimization skill** (`docs/optimization.md`) once the listing has been approved and serving real Context traffic for a few days. Requires Context Developer Mode enabled (Settings → Developer Settings in the Context app) so we can capture execution traces.
 - **Watch the Context dashboard listing status** at `https://www.ctxprotocol.com/developer/tools` for the next ~week. The `Active` / `Live` state badge is the proof-of-life signal; if it ever flips to `Deactivated`, capture the failure message and dig into the MCP server logs. Per Context's troubleshooting docs, 5+ schema-validation flags or repeated health-check failures trigger auto-deactivation.
 - **Consider a regime-classifier hysteresis pass.** The 2026-05-09 rebuild produced 9 regime flips across the trailing 32 days, several of which oscillate day-over-day (e.g. Apr 21→22, Apr 22→23). The cause is the classifier's 30d-delta threshold sitting near 0 during equilibrium periods; a hysteresis band ("must cross +0.30% to flip back to accumulation, must cross −0.30% to flip back to distribution") would smooth this without changing the deterministic guarantee. Bumping the methodology version is required if we change this.
+
+### Optimization-skill phase 6 fixes (2026-05-09)
+
+Pre-listing fixes shipped during the Tier-S optimization-skill run. All addressed against the deterministic-implementation contract; methodology version stays at `cohortsignal-v1.0`.
+
+1. **Pool starvation in `getRegimeChangeEvents`.** The 12-month historical context tool was timing out (`internal_error: timeout exceeded when trying to connect`) because it issued one DB query per snapshot via `getTrailingWindow()` — ~366 parallel queries against a max=5 pg pool. Fixed by pre-loading a single padded range (fromDate-31d → toDate) and computing the 30d rolling context for every snapshot in memory using the existing rolling helpers. One DB round trip instead of 366. `get_lth_supply_historical_context` now responds in ~2s (was failing). See `apps/mcp-server/src/service.ts:getRegimeChangeEvents`.
+2. **Regime classifier strong-growth override (rule A0).** When LTH supply is strongly growing (>+1% in 30d) AND `lthNetPositionChange30dAvgBtc > 0` (LTH cohort is actively net-accumulating, not just aging through), the classifier now returns `accumulation` regardless of young rotation. Without A0, fast-accumulation phases that produce STH inflow as a side effect (under_1m share rising) were being misclassified as equilibrium because rule A's rotation guard fired even when the LTH-side accumulation signal was unambiguous. The 2026-05-09 reading (+9.64% in 30d) now correctly returns `accumulation`. Added 5 new unit tests in `regime.test.ts`. See `packages/core/src/cohort/regime.ts:classifyRegime`.
+3. **SOPR signal parallelization.** `getLthSoprContext` now runs `getLastLthSoprBelowOneCrossover` and `getSnapshotRange(365d)` in parallel via `Promise.all`. Saves ~200ms.
+4. **Cache TTL for "now":** raised from 60s to 300s (matches the live indexer's 5-minute poll interval). Eliminates the 4-second cold-cache hit that Context's listing health probes were going to see every minute.
+5. **Honest latency classes:** `get_lth_supply_historical_context` and `get_lth_sopr_signal` downgraded from `latencyClass: "instant"` to `"fast"` to honestly reflect their measured 1.5-2s response time. Their descriptions also now state "typically returns in 1-2 seconds." Other 6 tools confirmed at sub-500ms warm and stay at `instant`.
+
+Test counts: 53 core (+5 new) + 15 mcp-server = 68. All green.
 
 ### Multi-initialize smoke test (the test we should have run before the first listing)
 

@@ -317,6 +317,14 @@ const TIMESERIES_META = {
   },
 };
 
+// Tools that scan a 365d window of cohort_snapshots (historical context,
+// SOPR signal): under-promise at "fast" rather than "instant" since cold
+// cache + window-function processing puts them in the 1.5-2s range.
+const RANGE_SCAN_META = {
+  ...STD_META_BOTH,
+  latencyClass: "fast" as const,
+};
+
 // =============================================================================
 // QUERY PROMPT TOOLS — six Query-primary methods, each shaped for a single
 // must-win prompt from the proposal. They share an underlying view but slice
@@ -352,7 +360,7 @@ export const TOOLS = [
   {
     name: "get_lth_supply_historical_context",
     description:
-      "How today's Bitcoin LTH supply compares to its 6-month and 12-month range, with percentile position and a list of regime change events in the trailing 12 months. Useful for cycle-position calls and weekly research notes.",
+      "How today's Bitcoin LTH supply compares to its 6-month and 12-month range, with percentile position and a list of regime change events in the trailing 12 months. Useful for cycle-position calls and weekly research notes. Scans a 12-month range of cohort snapshots — typically returns in 1-2 seconds.",
     inputSchema: {
       type: "object",
       properties: {
@@ -415,7 +423,7 @@ export const TOOLS = [
         "regimeChangeEvents",
       ],
     },
-    _meta: STD_META_BOTH,
+    _meta: RANGE_SCAN_META,
   },
 
   // ---------------------------------------------------------------------------
@@ -538,7 +546,7 @@ export const TOOLS = [
   {
     name: "get_lth_sopr_signal",
     description:
-      "LTH-SOPR (Spent Output Profit Ratio for UTXOs >= cohortBoundaryDays old) reading with status, behavioral state, 30d average, last cross-below-1.0 timestamp + days since, and a count of similar readings in the last 365 days. Tells you whether long-term holders are spending at a profit, a loss, or in capitulation.",
+      "LTH-SOPR (Spent Output Profit Ratio for UTXOs >= cohortBoundaryDays old) reading with status, behavioral state, 30d average, last cross-below-1.0 timestamp + days since, and a count of similar readings in the last 365 days. Tells you whether long-term holders are spending at a profit, a loss, or in capitulation. Scans a 365-day cohort series to compute the historical context — typically returns in 1-2 seconds.",
     inputSchema: {
       type: "object",
       properties: {
@@ -598,7 +606,7 @@ export const TOOLS = [
         "similarHistoricalReadings",
       ],
     },
-    _meta: STD_META_BOTH,
+    _meta: RANGE_SCAN_META,
   },
 
   // ---------------------------------------------------------------------------

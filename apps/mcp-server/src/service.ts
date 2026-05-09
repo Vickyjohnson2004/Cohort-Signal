@@ -200,7 +200,14 @@ export class PostgresCohortService implements CohortService {
   async getRegimeView(opts: BuildViewOptions): Promise<CohortRegimeView> {
     const cohortBoundaryDays = opts.cohortBoundaryDays ?? DEFAULT_COHORT_BOUNDARY_DAYS;
     const cacheKey = `csv:1:${cohortBoundaryDays}:${opts.asOfDate ?? "now"}`;
-    return cacheJson(cacheKey, opts.asOfDate ? 3600 : 60, () =>
+    // Cache TTLs:
+    //   - "now" (live edge): 300s. Matches the live indexer's 5-minute poll
+    //     interval. Going shorter wastes Postgres round-trips on a value
+    //     that hasn't changed; going longer risks serving stale provisional
+    //     snapshots after the indexer has advanced.
+    //   - historical asOfDate: 3600s. Historical snapshots are immutable
+    //     once finalized (provisional=false), so a longer TTL is safe.
+    return cacheJson(cacheKey, opts.asOfDate ? 3600 : 300, () =>
       this.buildRegimeView({ ...opts, cohortBoundaryDays }),
     );
   }
@@ -338,33 +345,42 @@ export class PostgresCohortService implements CohortService {
     toDate: string;
     cohortBoundaryDays: number;
   }): Promise<RegimeChangeEvent[]> {
-    const series = await getSnapshotRange(
+    // Pre-load a single contiguous range that includes 30 days of left-padding
+    // so every snapshot in [fromDate, toDate] has its 30-day rolling context
+    // available in memory. Previously this method issued one DB round trip per
+    // snapshot via getTrailingWindow(), which on a 12-month window is ~366
+    // parallel pool acquisitions against a max=5 pool. That starves the pool
+    // and times out under the 10s connectionTimeoutMillis cap. The rolling
+    // helpers already accept an in-memory series, so a single batched read
+    // gives us identical results with one round trip.
+    const paddedFrom = shiftDateByDaysUtc(opts.fromDate, -31);
+    const padded = await getSnapshotRange(
       this.pool,
-      opts.fromDate,
+      paddedFrom,
       opts.toDate,
       opts.cohortBoundaryDays,
     );
+    if (padded.length < 2) return [];
+
+    const series = padded.filter((s) => s.date >= opts.fromDate);
     if (series.length < 2) return [];
 
-    const enriched = await Promise.all(
-      series.map(async (snapshot) => {
-        const window = await getTrailingWindow(this.pool, snapshot.date, 31, opts.cohortBoundaryDays);
-        const prior30 = priorSnapshotDaysAgo(window, snapshot, 30);
-        const npc30 = meanNetPositionChange(window, snapshot, 30);
-        const sopr30 = meanLthSopr(window, snapshot, 30);
-        const inputs: RegimeInputs = {
-          lthSupplyBtc: snapshot.lthSupplyBtc,
-          lthSupplyDelta30dPct: deltaPct(snapshot, prior30),
-          lthSupplyDelta7dPct: deltaPct(snapshot, priorSnapshotDaysAgo(window, snapshot, 7)),
-          lthNetPositionChange30dAvgBtc: npc30,
-          lthSopr: snapshot.lthSopr,
-          lthSopr30dAvg: sopr30,
-          under1mPct: snapshot.hodlWaves.pctOfSupply.under_1m ?? 0,
-          under1mPct30dAgo: prior30?.hodlWaves.pctOfSupply.under_1m ?? snapshot.hodlWaves.pctOfSupply.under_1m ?? 0,
-        };
-        return { snapshot, inputs };
-      }),
-    );
+    const enriched = series.map((snapshot) => {
+      const prior30 = priorSnapshotDaysAgo(padded, snapshot, 30);
+      const npc30 = meanNetPositionChange(padded, snapshot, 30);
+      const sopr30 = meanLthSopr(padded, snapshot, 30);
+      const inputs: RegimeInputs = {
+        lthSupplyBtc: snapshot.lthSupplyBtc,
+        lthSupplyDelta30dPct: deltaPct(snapshot, prior30),
+        lthSupplyDelta7dPct: deltaPct(snapshot, priorSnapshotDaysAgo(padded, snapshot, 7)),
+        lthNetPositionChange30dAvgBtc: npc30,
+        lthSopr: snapshot.lthSopr,
+        lthSopr30dAvg: sopr30,
+        under1mPct: snapshot.hodlWaves.pctOfSupply.under_1m ?? 0,
+        under1mPct30dAgo: prior30?.hodlWaves.pctOfSupply.under_1m ?? snapshot.hodlWaves.pctOfSupply.under_1m ?? 0,
+      };
+      return { snapshot, inputs };
+    });
 
     const flips = findRegimeChangeEvents(enriched);
     return flips.map((f) => ({ ...f, cohortBoundaryDays: opts.cohortBoundaryDays }));
@@ -424,20 +440,14 @@ export class PostgresCohortService implements CohortService {
   }): Promise<LthSoprContext> {
     const cohortBoundaryDays = opts.cohortBoundaryDays ?? DEFAULT_COHORT_BOUNDARY_DAYS;
     const view = await this.getRegimeView({ asOfDate: opts.asOfDate, cohortBoundaryDays });
-    const lastBelowOne = await getLastLthSoprBelowOneCrossover(
-      this.pool,
-      cohortBoundaryDays,
-      view.asOfDate,
-    );
-    // historical context: how many days in the trailing 365d had SOPR
-    // below 1 (or above 1.05, depending on current state)
+    // Run the two independent reads in parallel: the last cross-below-1.0
+    // crossover lookup and the 365-day series scan don't depend on each
+    // other.
     const yearStart = shiftDateByDaysUtc(view.asOfDate, -365);
-    const series = await getSnapshotRange(
-      this.pool,
-      yearStart,
-      view.asOfDate,
-      cohortBoundaryDays,
-    );
+    const [lastBelowOne, series] = await Promise.all([
+      getLastLthSoprBelowOneCrossover(this.pool, cohortBoundaryDays, view.asOfDate),
+      getSnapshotRange(this.pool, yearStart, view.asOfDate, cohortBoundaryDays),
+    ]);
     const direction: "below" | "above" =
       view.lthSopr !== null && view.lthSopr < 1.0 ? "below" : "above";
     const threshold = direction === "below" ? 1.0 : 1.05;

@@ -53,6 +53,14 @@ export interface RegimeInputs {
  * The combinations map to regimes as follows. Decision-tree rules are
  * applied top-down — first match wins.
  *
+ *   A0. supply=growing-strongly (delta30d_pct > +1.0%) AND
+ *       lth_net_position_change_30d_avg > 0 AND
+ *       spending != profit
+ *        => accumulation  (LTH cohort is unambiguously net-accumulating; the
+ *                          rotation signal is overridden because under_1m
+ *                          share can grow during accumulation phases purely
+ *                          from new STH inflow rather than LTH distribution)
+ *
  *   A. supply=growing AND spending != profit AND rotation != rotating_to_young
  *        => accumulation  (LTHs are absorbing supply, not selling it)
  *
@@ -74,11 +82,30 @@ export interface RegimeInputs {
  * response. They are conservative on purpose: noisy daily flips of the
  * regime label are useless to a buyer. With these thresholds, regime flips
  * historically align with the well-known Bitcoin cycle inflection points.
+ *
+ * Rule A0 is a deterministic-implementation refinement of Rule A: it does
+ * not change the published rule set's intent (LTHs absorbing supply is
+ * accumulation), it just removes a false-equilibrium edge case where a fast
+ * accumulation phase produces young-rotation as a side effect of new STH
+ * inflow. The rule's two guards (>1% supply growth AND positive
+ * net-position-change-30d-avg) require unambiguous LTH-side accumulation
+ * before the rotation signal is overridden.
  */
+export const STRONG_GROWTH_DELTA30D_PCT = 0.01;
+
 export function classifyRegime(inputs: RegimeInputs): RegimeClassifier {
   const supplyTrajectory = supplyTrajectoryOf(inputs.lthSupplyDelta30dPct);
   const spending = spendingPressureOf(inputs.lthSopr);
   const rotation = rotationOf(inputs.under1mPct, inputs.under1mPct30dAgo);
+
+  // Rule A0 — strong-growth override for accumulation
+  if (
+    inputs.lthSupplyDelta30dPct > STRONG_GROWTH_DELTA30D_PCT &&
+    inputs.lthNetPositionChange30dAvgBtc > 0 &&
+    spending !== "profit"
+  ) {
+    return "accumulation";
+  }
 
   // Rule A — accumulation
   if (
@@ -188,8 +215,8 @@ export function findRegimeChangeEvents(
 export const REGIME_METHODOLOGY = [
   "CohortSignal v1.0 deterministic regime classifier.",
   "Long-term holder boundary: 155 days of UTXO age (Glassnode-standard, configurable).",
-  "Inputs: 30d LTH supply delta, current LTH-SOPR, 30d under_1m HODL waves rotation.",
-  "Thresholds: supply-trajectory ±0.20% over 30d; spending-pressure ±1.0% from 1.0; rotation ±1.0pp over 30d.",
-  "Rules (first match wins): A) growing & not-profit & not-young-rotating -> accumulation; B) shrinking & (profit OR young-rotating) -> distribution; C) shrinking & loss & not-young-rotating -> distribution; D) growing & profit -> equilibrium; E) else -> equilibrium.",
+  "Inputs: 30d LTH supply delta, 30d-avg LTH net position change, current LTH-SOPR, 30d under_1m HODL waves rotation.",
+  "Thresholds: supply-trajectory ±0.20% over 30d; strong-growth override at +1.00% over 30d; spending-pressure ±1.0% from 1.0; rotation ±1.0pp over 30d.",
+  "Rules (first match wins): A0) supply >+1.0% over 30d & npc30 > 0 & not-profit -> accumulation (strong-growth override); A) growing & not-profit & not-young-rotating -> accumulation; B) shrinking & (profit OR young-rotating) -> distribution; C) shrinking & loss & not-young-rotating -> distribution; D) growing & profit -> equilibrium; E) else -> equilibrium.",
   "All inputs are reproducible from cohort_snapshots rows; no proprietary data, no LLM synthesis.",
 ].join(" ");

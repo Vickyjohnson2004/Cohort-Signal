@@ -132,3 +132,76 @@ describe("classifyRegime — null SOPR robustness", () => {
     ).toBe("accumulation");
   });
 });
+
+describe("classifyRegime — rule A0 (strong-growth override)", () => {
+  // Background: when LTH supply is unambiguously net-accumulating (>1% in 30d
+  // AND positive 30d net position change), under_1m share growing is a
+  // side-effect of new STH inflow rather than LTH distribution. Rule A0
+  // overrides the rotation guard in that scenario.
+  it("strong growth + positive npc30 + young rotation + neutral SOPR -> accumulation", () => {
+    expect(
+      classifyRegime({
+        ...baseInputs,
+        lthSupplyDelta30dPct: 0.0964, // +9.64% — observed real-world value
+        lthNetPositionChange30dAvgBtc: 36_712,
+        under1mPct: 0.07,
+        under1mPct30dAgo: 0.04, // +3pp young rotation
+      }),
+    ).toBe("accumulation");
+  });
+
+  it("strong growth + positive npc30 + young rotation + null SOPR -> accumulation", () => {
+    expect(
+      classifyRegime({
+        ...baseInputs,
+        lthSupplyDelta30dPct: 0.05,
+        lthNetPositionChange30dAvgBtc: 20_000,
+        lthSopr: null,
+        under1mPct: 0.08,
+        under1mPct30dAgo: 0.05,
+      }),
+    ).toBe("accumulation");
+  });
+
+  it("strong growth but profit SOPR -> falls through to rule D (equilibrium)", () => {
+    // Profit SOPR is a real LTH-side distribution signal even if growth is
+    // strong; A0 must not override it. Falls through to rule D.
+    expect(
+      classifyRegime({
+        ...baseInputs,
+        lthSupplyDelta30dPct: 0.05,
+        lthNetPositionChange30dAvgBtc: 20_000,
+        lthSopr: 1.05,
+        under1mPct: 0.07,
+        under1mPct30dAgo: 0.04,
+      }),
+    ).toBe("equilibrium");
+  });
+
+  it("strong growth but negative npc30 -> falls through (rule A blocked by rotation, hits E)", () => {
+    // Strong delta but cohort is actually losing coins on a daily basis (only
+    // appears to be growing on the 30d window because of an earlier surge).
+    // A0 should not fire.
+    expect(
+      classifyRegime({
+        ...baseInputs,
+        lthSupplyDelta30dPct: 0.05,
+        lthNetPositionChange30dAvgBtc: -5_000,
+        under1mPct: 0.07,
+        under1mPct30dAgo: 0.04,
+      }),
+    ).toBe("equilibrium");
+  });
+
+  it("borderline growth (exactly +1.0%) does NOT trigger A0 (uses strict >)", () => {
+    expect(
+      classifyRegime({
+        ...baseInputs,
+        lthSupplyDelta30dPct: 0.01,
+        lthNetPositionChange30dAvgBtc: 10_000,
+        under1mPct: 0.07,
+        under1mPct30dAgo: 0.04, // young rotation blocks rule A
+      }),
+    ).toBe("equilibrium"); // falls through to E
+  });
+});
