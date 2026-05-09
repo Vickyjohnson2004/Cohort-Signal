@@ -249,15 +249,16 @@ HODL bands match Glassnode dashboard exactly (`under_1m`, `1m_3m`, `3m_6m`, `6m_
 | Per-session MCP `Server` instance fix (post-deploy crash repair) | ✅ — see `apps/mcp-server/src/server.ts:createMcpServer` |
 | Multi-initialize smoke test (5x sequential `initialize` returns 200) | ✅ verified 2026-05-09 against production |
 | Context Protocol listing re-submitted | ✅ re-listed 2026-05-09 after per-session fix; in review |
-| Daily Cron service on Railway for incremental updates | 🟡 wrapper script + `railway.cron.json` committed, awaiting Railway dashboard wiring per `docs/deployment.md` step 4b |
-| Optimization skill run + tweaks applied | ⬜ |
+| Daily Cron service on Railway for incremental updates | ✅ deployed 2026-05-09; full-rebuild pipeline verified end-to-end (3,051 snapshots, 279 regime changes — exact match to canonical state). The original `--from 60d-ago` strategy was incorrect (the rebuild engine starts UTXO age tracking from `inputs.creations[0].creationDate`, so partial creations input emits LTH=0 across the window) — the cron now runs a full rebuild every day. |
+| Optimization skill run + tweaks applied | ⬜ pending listing approval + a few days of real Context traffic |
 
 ---
 
 ## Open follow-ups
 
-- **Wire the cron service in the Railway dashboard** per `docs/deployment.md` step 4b. Wrapper script and config-as-code file are committed; Railway-side wiring (third service, schedule `0 6 * * *`, env vars) is the only remaining manual step.
-- **Run the optimization skill** (`docs/optimization.md`) once the listing is approved and routing live traffic.
+- **Run the optimization skill** (`docs/optimization.md`) once the listing has been approved and serving real Context traffic for a few days. Requires Context Developer Mode enabled (Settings → Developer Settings in the Context app) so we can capture execution traces.
+- **Watch the Context dashboard listing status** at `https://www.ctxprotocol.com/developer/tools` for the next ~week. The `Active` / `Live` state badge is the proof-of-life signal; if it ever flips to `Deactivated`, capture the failure message and dig into the MCP server logs. Per Context's troubleshooting docs, 5+ schema-validation flags or repeated health-check failures trigger auto-deactivation.
+- **Consider a regime-classifier hysteresis pass.** The 2026-05-09 rebuild produced 9 regime flips across the trailing 32 days, several of which oscillate day-over-day (e.g. Apr 21→22, Apr 22→23). The cause is the classifier's 30d-delta threshold sitting near 0 during equilibrium periods; a hysteresis band ("must cross +0.30% to flip back to accumulation, must cross −0.30% to flip back to distribution") would smooth this without changing the deterministic guarantee. Bumping the methodology version is required if we change this.
 
 ### Multi-initialize smoke test (the test we should have run before the first listing)
 
