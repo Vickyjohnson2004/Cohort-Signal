@@ -114,9 +114,38 @@ curl https://<your-railway-domain>/health
    - **`GCP_PROJECT_ID`** — optional if `project_id` is present in the JSON.
    - For the **live mode** (default, started by the railway.json), the indexer only needs `DATABASE_URL` and `ESPLORA_API_URL`. GCP credentials are only required if you switch the start command to a `bq-bootstrap` run.
 5. **Start command**: `node apps/indexer/dist/main.js live` — set in `apps/indexer/railway.json`.
-6. **Operations**: the worker polls every 5 minutes (`INDEXER_POLL_INTERVAL_MS`), updating the provisional today-snapshot from the chain tip via Esplora. The historical frontier (every day from 2018-01-01 to yesterday) is advanced offline by re-running `bq-bootstrap` (incremental — only new dates are billed) followed by `rebuild`. Schedule that combination as a daily Railway Cron service if you want zero-touch operation:
-   - Cron service start command: `node apps/indexer/dist/main.js bq-bootstrap --from $(date -u -d 'yesterday' +%Y-%m-%d) --to $(date -u +%Y-%m-%d) && node apps/indexer/dist/main.js prices --from $(date -u -d '7 days ago' +%Y-%m-%d) && node apps/indexer/dist/main.js rebuild --from $(date -u -d '60 days ago' +%Y-%m-%d)`
-   - Cron schedule: `0 6 * * *` (06:00 UTC daily).
+6. **Operations**: the worker polls every 5 minutes (`INDEXER_POLL_INTERVAL_MS`), updating the provisional today-snapshot from the chain tip via Esplora. The historical frontier (every day from 2018-01-01 to yesterday) is advanced offline by re-running `bq-bootstrap` (incremental — only new dates are billed) followed by `rebuild`. Schedule that combination as a daily Railway Cron service (step 4b below) if you want zero-touch operation.
+
+## 4b. Deploy the daily cron service to Railway
+
+The live worker only updates today's provisional snapshot. The historical floor (yesterday and earlier) needs the BigQuery extract + price refresh + deterministic rebuild loop, run once per day. The repo ships a wrapper script and a per-service Railway config for this.
+
+1. Add a **third service** in the same Railway project from the same GitHub repo. Name it `cohortsignal-cron`.
+2. **Root Directory**: `apps/indexer` (so Railway resolves the script path correctly).
+3. Settings → **Config-as-Code Path**: `apps/indexer/railway.cron.json`.
+   This is the only thing that distinguishes the cron service from the live indexer service — same image, same env vars, different start command (`bash apps/indexer/scripts/daily-update.sh`) and `restartPolicyType: NEVER`.
+4. Settings → **Cron Schedule** (Railway's cron primitive): `0 6 * * *` (06:00 UTC daily).
+5. **Networking**: leave **public networking off**. This is a worker.
+6. **Environment variables**: same as the indexer service. Critically, `GCP_SA_KEY_JSON` is required because the cron job runs `bq-bootstrap`. Easiest: copy the indexer's variables across with Railway's "Copy from another service" feature.
+7. **Verify the script**: trigger a manual run from the Railway UI (Deployments → Trigger Deployment → "Run cron now"). You should see in the logs:
+   ```
+   [cron] daily-update.sh starting at <ISO timestamp>
+   [cron] phase 1/3: bq-bootstrap ...
+   [bq] phase=spends rowsSeen=... rowsWritten=... pageBytes=...GB
+   [cron] phase 2/3: prices ...
+   [cron] phase 3/3: rebuild ...
+   [rebuild] <date> LTH=... STH=... days=...
+   [cron] daily-update.sh complete at <ISO timestamp>
+   ```
+   Total runtime ~1-2 minutes, exit code 0. Total BigQuery cost: well under free-tier daily limits (~150 MB scan per run vs the 1 TB/month cap).
+8. **Operational checks**: after the first scheduled run, verify the floor moved by reading `cohort_snapshots`:
+   ```sql
+   SELECT MAX(snapshot_date), provisional, COUNT(*)
+   FROM cohort_snapshots WHERE cohort_boundary_days = 155
+   GROUP BY provisional
+   ORDER BY provisional;
+   ```
+   You should see the maximum non-provisional date advance to yesterday's UTC date after each cron run.
 
 ## 5. Register on Context
 

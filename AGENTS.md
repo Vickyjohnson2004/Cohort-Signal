@@ -141,16 +141,21 @@ Required env vars per service: see `.env.example`. Critical:
 
 The MCP server binds to `0.0.0.0:$PORT` (set explicitly in `apps/mcp-server/src/server.ts`).
 
-### Daily incremental updates (recommended Railway Cron)
+### Daily incremental updates (Railway Cron)
+
+A third Railway service (`cohortsignal-cron`) runs the daily incremental pipeline at 06:00 UTC. Same monorepo, same image as the indexer, but uses `apps/indexer/railway.cron.json` (start command `bash apps/indexer/scripts/daily-update.sh`, `restartPolicyType: NEVER`).
+
+The script runs three idempotent phases:
 
 ```
-0 6 * * *
-node apps/indexer/dist/main.js bq-bootstrap --from <yesterday> --to <today> &&
-node apps/indexer/dist/main.js prices --from <7-days-ago> &&
-node apps/indexer/dist/main.js rebuild --from <60-days-ago>
+1. bq-bootstrap --from <yesterday> --to <today>     (~150 MB BigQuery scan)
+2. prices --from <7-days-ago>                       (~50 KB CryptoCompare)
+3. rebuild --from <60-days-ago>                     (no external network)
 ```
 
-The 60-day rolling rebuild keeps trailing 30/90d stats correct without redoing 6 years of history.
+The 60-day rolling rebuild keeps trailing 30/90d stats correct without redoing 6 years of history. Total runtime ~1-2 minutes per run.
+
+See `docs/deployment.md` step 4b for the Railway dashboard wiring.
 
 ---
 
@@ -240,17 +245,16 @@ HODL bands match Glassnode dashboard exactly (`under_1m`, `1m_3m`, `3m_6m`, `6m_
 | MCP server deployed on Railway | ✅ |
 | Indexer deployed on Railway | ✅ — chainTipHeight live, lagSeconds < 200 |
 | Per-session MCP `Server` instance fix (post-deploy crash repair) | ✅ — see `apps/mcp-server/src/server.ts:createMcpServer` |
-| Context Protocol listing submitted | 🟡 attempted 2026-05-06, deactivated after server crash-loop; pending re-list once the per-session-server fix is verified in production |
+| Multi-initialize smoke test (5x sequential `initialize` returns 200) | ✅ verified 2026-05-09 against production |
+| Context Protocol listing re-submitted | ✅ re-listed 2026-05-09 after per-session fix; in review |
+| Daily Cron service on Railway for incremental updates | 🟡 wrapper script + `railway.cron.json` committed, awaiting Railway dashboard wiring per `docs/deployment.md` step 4b |
 | Optimization skill run + tweaks applied | ⬜ |
-| Daily Cron service on Railway for incremental updates | ⬜ |
 
 ---
 
 ## Open follow-ups
 
-- **Re-list on Context** after redeploying the MCP service with the per-session `Server` fix. The previous attempt (2026-05-06) auto-deactivated after Context's continuous health probes triggered the SDK error `"Already connected to a transport. Call close() before connecting to a new transport, or use a separate Protocol instance per connection."` That bug has been fixed: each `initialize` request now creates a fresh `Server` via `createMcpServer()`, and `transport.onclose` calls `server.close()` before deleting the session entry. Verify by running the multi-initialize smoke test below before resubmitting.
-- **Rotate the Context API key** that was pasted into chat on 2026-05-06 (`sk_live_REDACTED`). Revoke + reissue in the Context developer dashboard.
-- **Set up Railway Cron** for daily incremental updates (cron spec under "Daily incremental updates" above).
+- **Wire the cron service in the Railway dashboard** per `docs/deployment.md` step 4b. Wrapper script and config-as-code file are committed; Railway-side wiring (third service, schedule `0 6 * * *`, env vars) is the only remaining manual step.
 - **Run the optimization skill** (`docs/optimization.md`) once the listing is approved and routing live traffic.
 
 ### Multi-initialize smoke test (the test we should have run before the first listing)

@@ -1,0 +1,11 @@
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "NIXPACKS",
+    "buildCommand": "pnpm --filter @cohortsignal/core build && pnpm --filter @cohortsignal/indexer build"
+  },
+  "deploy": {
+    "startCommand": "bash apps/indexer/scripts/daily-update.sh",
+    "restartPolicyType": "NEVER"
+  }
+}
