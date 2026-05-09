@@ -38,3 +38,6 @@ dumps/
 
 # Build artifacts
 .turbo/
+
+# Optimization-skill working artifact (Tier-S grant submission, not for public repo)
+optimization-artifact.json
