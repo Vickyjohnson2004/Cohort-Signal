@@ -243,7 +243,7 @@ HODL bands match Glassnode dashboard exactly (`under_1m`, `1m_3m`, `3m_6m`, `6m_
 | Redis hot cache | ✅ (TTL: 60s for "now", 3600s for historical asOfDate) |
 | Freshness / provisional / evidenceURL on every response | ✅ |
 | README + methodology + deployment docs | ✅ |
-| Push to GitHub (`Victorvalour/Cohort-Signal`, `main` branch) | ✅ |
+| Push to GitHub (`Vickyjohnson2004/Cohort-Signal`, `main` branch) | ✅ |
 | MCP server deployed on Railway | ✅ |
 | Indexer deployed on Railway | ✅ — chainTipHeight live, lagSeconds < 200 |
 | Per-session MCP `Server` instance fix (post-deploy crash repair) | ✅ — see `apps/mcp-server/src/server.ts:createMcpServer` |
