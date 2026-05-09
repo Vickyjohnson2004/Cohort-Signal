@@ -61,21 +61,36 @@ const pool = await getPoolAsync().catch((err) => {
 console.log(`[cohortsignal] boot: Postgres connected.`);
 const service = new PostgresCohortService(pool);
 
-const server = new Server(
-  { name: SERVER_INFO.name, version: SERVER_INFO.version },
-  { capabilities: { tools: {} } },
-);
+// Each initialize call MUST create its own Server instance. The MCP SDK
+// rejects connecting a second transport to a Server that is already
+// connected ("Already connected to a transport. Call close() before
+// connecting to a new transport, or use a separate Protocol instance per
+// connection."), and Context's health probes plus any concurrent client
+// traffic will hit that path repeatedly. Sharing a single Server across
+// sessions is the bug that was crashing the container in production.
+function createMcpServer(): Server {
+  const s = new Server(
+    { name: SERVER_INFO.name, version: SERVER_INFO.version },
+    { capabilities: { tools: {} } },
+  );
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: TOOLS as unknown as Array<Record<string, unknown>>,
-}));
+  s.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: TOOLS as unknown as Array<Record<string, unknown>>,
+  }));
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-  return callTool(service, name, (args ?? {}) as Record<string, unknown>);
-});
+  s.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+    return callTool(service, name, (args ?? {}) as Record<string, unknown>);
+  });
 
-const transports: Record<string, StreamableHTTPServerTransport> = {};
+  return s;
+}
+
+interface SessionEntry {
+  transport: StreamableHTTPServerTransport;
+  server: Server;
+}
+const sessions: Record<string, SessionEntry> = {};
 let verifyContextAuth: RequestHandler | null = null;
 try {
   verifyContextAuth = createContextMiddleware();
@@ -109,51 +124,95 @@ app.get("/health", async (_req: Request, res: Response) => {
 
 // ----- MCP endpoint (Streamable HTTP) -----
 app.post("/mcp", mcpAuthMiddleware, async (req: Request, res: Response) => {
-  const sessionId = req.headers["mcp-session-id"] as string | undefined;
-  let transport: StreamableHTTPServerTransport;
+  try {
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    let transport: StreamableHTTPServerTransport;
 
-  if (sessionId && transports[sessionId]) {
-    transport = transports[sessionId];
-  } else if (!sessionId && isInitializeRequest(req.body)) {
-    transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
-      onsessioninitialized: (id) => {
-        transports[id] = transport;
-      },
-    });
-    transport.onclose = () => {
-      if (transport.sessionId) delete transports[transport.sessionId];
-    };
-    await server.connect(transport);
-  } else {
-    res.status(400).json({
-      jsonrpc: "2.0",
-      error: { code: -32000, message: "Invalid session" },
-      id: null,
-    });
-    return;
+    if (sessionId && sessions[sessionId]) {
+      transport = sessions[sessionId].transport;
+    } else if (!sessionId && isInitializeRequest(req.body)) {
+      const mcpServer = createMcpServer();
+      transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (id) => {
+          sessions[id] = { transport, server: mcpServer };
+        },
+      });
+      transport.onclose = () => {
+        const sid = transport.sessionId;
+        if (sid && sessions[sid]) {
+          sessions[sid].server.close().catch(() => undefined);
+          delete sessions[sid];
+        }
+      };
+      await mcpServer.connect(transport);
+    } else {
+      res.status(400).json({
+        jsonrpc: "2.0",
+        error: { code: -32000, message: "Invalid session" },
+        id: null,
+      });
+      return;
+    }
+    await transport.handleRequest(req, res, req.body);
+  } catch (err) {
+    console.error("[cohortsignal] /mcp POST error", err);
+    if (!res.headersSent) {
+      res.status(500).json({
+        jsonrpc: "2.0",
+        error: { code: -32603, message: "Internal server error" },
+        id: null,
+      });
+    }
   }
-  await transport.handleRequest(req, res, req.body);
 });
 
 app.get("/mcp", mcpAuthMiddleware, async (req: Request, res: Response) => {
-  const sessionId = req.headers["mcp-session-id"] as string | undefined;
-  const transport = sessionId ? transports[sessionId] : undefined;
-  if (transport) {
-    await transport.handleRequest(req, res);
-  } else {
-    res.status(400).json({ error: "Invalid session" });
+  try {
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    const entry = sessionId ? sessions[sessionId] : undefined;
+    if (entry) {
+      await entry.transport.handleRequest(req, res);
+    } else {
+      res.status(400).json({ error: "Invalid session" });
+    }
+  } catch (err) {
+    console.error("[cohortsignal] /mcp GET error", err);
+    if (!res.headersSent) res.status(500).json({ error: "Internal server error" });
   }
 });
 
 app.delete("/mcp", mcpAuthMiddleware, async (req: Request, res: Response) => {
-  const sessionId = req.headers["mcp-session-id"] as string | undefined;
-  const transport = sessionId ? transports[sessionId] : undefined;
-  if (transport) {
-    await transport.handleRequest(req, res);
-  } else {
-    res.status(400).json({ error: "Invalid session" });
+  try {
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    const entry = sessionId ? sessions[sessionId] : undefined;
+    if (entry) {
+      await entry.transport.handleRequest(req, res);
+    } else {
+      res.status(400).json({ error: "Invalid session" });
+    }
+  } catch (err) {
+    console.error("[cohortsignal] /mcp DELETE error", err);
+    if (!res.headersSent) res.status(500).json({ error: "Internal server error" });
   }
+});
+
+// Top-level Express error handler. Any error that bubbles past a route's
+// own try/catch (synchronous throws inside middleware, for example) lands
+// here and is logged + returned as 500, instead of crashing the process.
+app.use((err: unknown, _req: Request, res: Response, _next: () => void) => {
+  console.error("[cohortsignal] unhandled express error:", err);
+  if (!res.headersSent) {
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Also catch any truly unhandled async errors (last-resort safety net).
+process.on("unhandledRejection", (reason) => {
+  console.error("[cohortsignal] unhandledRejection:", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[cohortsignal] uncaughtException:", err);
 });
 
 const httpServer = app.listen(PORT, HOST, () => {

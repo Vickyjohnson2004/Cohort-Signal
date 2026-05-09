@@ -4,7 +4,7 @@ This file is the **source of truth for any new Cursor / Codex / Claude
 session** working on this repository. Read it first; treat its contents as
 context to avoid re-discovering what's been built.
 
-> Last updated: 2026-05-06.
+> Last updated: 2026-05-09.
 
 ---
 
@@ -237,9 +237,10 @@ HODL bands match Glassnode dashboard exactly (`under_1m`, `1m_3m`, `3m_6m`, `6m_
 | Freshness / provisional / evidenceURL on every response | ✅ |
 | README + methodology + deployment docs | ✅ |
 | Push to GitHub (`Victorvalour/Cohort-Signal`, `main` branch) | ✅ |
-| MCP server deployed on Railway | ✅ (verify at /health) |
-| Indexer deployed on Railway | 🟡 in progress |
-| Context Protocol listing submitted | ⬜ |
+| MCP server deployed on Railway | ✅ |
+| Indexer deployed on Railway | ✅ — chainTipHeight live, lagSeconds < 200 |
+| Per-session MCP `Server` instance fix (post-deploy crash repair) | ✅ — see `apps/mcp-server/src/server.ts:createMcpServer` |
+| Context Protocol listing submitted | 🟡 attempted 2026-05-06, deactivated after server crash-loop; pending re-list once the per-session-server fix is verified in production |
 | Optimization skill run + tweaks applied | ⬜ |
 | Daily Cron service on Railway for incremental updates | ⬜ |
 
@@ -247,11 +248,27 @@ HODL bands match Glassnode dashboard exactly (`under_1m`, `1m_3m`, `3m_6m`, `6m_
 
 ## Open follow-ups
 
-- **Rotate the GCP service-account key** that was leaked in chat earlier in the project. Generate a new key in IAM → Service Accounts → Keys, paste it into Railway as `GCP_SA_KEY_JSON`, then disable the old one in IAM.
-- **Generate domain for the MCP service** in Railway → Networking → Public Networking → Generate Domain (port 3000).
-- **Test the live `/health` endpoint** end-to-end after deploy.
-- **Submit the listing on Context** at https://ctxprotocol.com (developer dashboard → new tool listing → MCP endpoint URL → pricing → submit). Then run the optimization skill (`docs/optimization.md`).
-- **Set up Railway Cron** for daily incremental updates.
+- **Re-list on Context** after redeploying the MCP service with the per-session `Server` fix. The previous attempt (2026-05-06) auto-deactivated after Context's continuous health probes triggered the SDK error `"Already connected to a transport. Call close() before connecting to a new transport, or use a separate Protocol instance per connection."` That bug has been fixed: each `initialize` request now creates a fresh `Server` via `createMcpServer()`, and `transport.onclose` calls `server.close()` before deleting the session entry. Verify by running the multi-initialize smoke test below before resubmitting.
+- **Rotate the Context API key** that was pasted into chat on 2026-05-06 (`sk_live_REDACTED`). Revoke + reissue in the Context developer dashboard.
+- **Set up Railway Cron** for daily incremental updates (cron spec under "Daily incremental updates" above).
+- **Run the optimization skill** (`docs/optimization.md`) once the listing is approved and routing live traffic.
+
+### Multi-initialize smoke test (the test we should have run before the first listing)
+
+After any change to `apps/mcp-server/src/server.ts`, run this against the deployed Railway URL. It catches the per-session-server bug class:
+
+```bash
+URL=https://<your-mcp-domain>/mcp
+TOKEN=<your-CONTEXT_API_KEY>
+for i in 1 2 3 4 5; do
+  curl -s -o /dev/null -w "init#$i: %{http_code}\n" -X POST "$URL" \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -H "Authorization: Bearer $TOKEN" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":$i,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"smoke\",\"version\":\"0.1\"}}}"
+done
+# Expect: init#1..5 all return 200. Pre-fix would return 200 on init#1 then crash the container.
+```
 
 ---
 
@@ -262,4 +279,5 @@ HODL bands match Glassnode dashboard exactly (`under_1m`, `1m_3m`, `3m_6m`, `6m_
 - **Don't paste secrets in chat.** The GCP key paste earlier in the project is the one ongoing security concern; everything else is in `.env` (gitignored) or Railway variables.
 - **Context Protocol's exact requirements** are: structured `outputSchema`, `structuredContent` matching that schema on every response, `_meta` with `surface`, `queryEligible`, `latencyClass`, `pricing`, `rateLimit`, and `createContextMiddleware()` not commented out. All implemented.
 - **Cohort boundary** is per-call configurable via `cohortBoundaryDays` (default 155, range 7–1825). Don't drop the validation in `apps/mcp-server/src/handlers.ts:pickCohortBoundary`.
+- **Don't share a single MCP `Server` across sessions.** `apps/mcp-server/src/server.ts:createMcpServer` exists for a reason — the MCP SDK throws `"Already connected to a transport"` on the second `initialize` if the same `Server` is reused. Each session must get its own `Server`, and `transport.onclose` must call `server.close()` to free the per-session resources. The 2026-05-06 production crash-loop traced back to this exact mistake; the smoke test in "Open follow-ups" above is the regression check.
 - For DB inspection, prefer the helper scripts in `apps/indexer/scripts/` over ad-hoc one-liners — they handle dotenv loading correctly.

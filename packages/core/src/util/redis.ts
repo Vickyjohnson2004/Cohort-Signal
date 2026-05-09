@@ -8,11 +8,39 @@ let cached: Redis | null = null;
  */
 export function getRedis(): Redis | null {
   if (cached) return cached;
-  const url = process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-  if (!url || !token) return null;
+  const rawUrl = process.env.UPSTASH_REDIS_REST_URL;
+  const rawToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!rawUrl || !rawToken) return null;
+  // Defensive: copying secrets from dashboards (Upstash, Railway) very
+  // commonly leaves a trailing newline or surrounding quotes. Upstash's
+  // own client warns about it but still happily attempts auth, which then
+  // fails opaquely. Trim outer whitespace + matching quotes here so a
+  // pasted-with-newline token still works.
+  const url = stripQuotes(rawUrl.trim());
+  const token = stripQuotes(rawToken.trim());
+  if (/\s/.test(token)) {
+    console.warn(
+      "[redis] UPSTASH_REDIS_REST_TOKEN contains internal whitespace after trim; cache will likely fail to authenticate. Re-paste the token without line breaks.",
+    );
+  }
+  if (/\s/.test(url)) {
+    console.warn(
+      "[redis] UPSTASH_REDIS_REST_URL contains internal whitespace after trim; cache will likely fail to authenticate.",
+    );
+  }
   cached = new Redis({ url, token });
   return cached;
+}
+
+function stripQuotes(s: string): string {
+  if (s.length >= 2) {
+    const first = s[0];
+    const last = s[s.length - 1];
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      return s.slice(1, -1);
+    }
+  }
+  return s;
 }
 
 /**
