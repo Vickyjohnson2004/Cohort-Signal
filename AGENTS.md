@@ -148,12 +148,14 @@ A third Railway service (`cohortsignal-cron`) runs the daily incremental pipelin
 The script runs three idempotent phases:
 
 ```
-1. bq-bootstrap --from <yesterday> --to <today>     (~150 MB BigQuery scan)
+1. bq-bootstrap --from <yesterday> --to <today>     (BigQuery, tiny)
 2. prices --from <7-days-ago>                       (~50 KB CryptoCompare)
-3. rebuild --from <60-days-ago>                     (no external network)
+3. rebuild  (NO --from flag, full 2018-today)       (~11 min, Postgres-only)
 ```
 
-The 60-day rolling rebuild keeps trailing 30/90d stats correct without redoing 6 years of history. Total runtime ~1-2 minutes per run.
+**Phase 3 must NOT pass `--from`.** The deterministic engine in `packages/core/src/cohort/rebuild.ts:rebuildSnapshotsStreaming` starts UTXO age tracking from `inputs.creations[0].creationDate`. A partial rebuild loads only the trailing window of creations, which makes the engine think the chain has zero history before that window, and every emitted snapshot reports LTH=0. The 2026-05-09 cron run did exactly this and corrupted 61 days of `cohort_snapshots` before we caught it via the snapshot table showing `lth=0` across the trailing window.
+
+`rebuildAllSnapshots` now throws if you pass a `--from` later than the earliest creation on file (see the guard added to `apps/indexer/src/rebuildSnapshots.ts`). The full rebuild takes ~11 minutes but is deterministic, idempotent, and Postgres-I/O-only — cost is negligible.
 
 See `docs/deployment.md` step 4b for the Railway dashboard wiring.
 
@@ -284,5 +286,6 @@ done
 - **Context Protocol's exact requirements** are: structured `outputSchema`, `structuredContent` matching that schema on every response, `_meta` with `surface`, `queryEligible`, `latencyClass`, `pricing`, `rateLimit`, and `createContextMiddleware()` not commented out. All implemented.
 - **Cohort boundary** is per-call configurable via `cohortBoundaryDays` (default 155, range 7–1825). Don't drop the validation in `apps/mcp-server/src/handlers.ts:pickCohortBoundary`.
 - **Don't share a single MCP `Server` across sessions.** `apps/mcp-server/src/server.ts:createMcpServer` exists for a reason — the MCP SDK throws `"Already connected to a transport"` on the second `initialize` if the same `Server` is reused. Each session must get its own `Server`, and `transport.onclose` must call `server.close()` to free the per-session resources. The 2026-05-06 production crash-loop traced back to this exact mistake; the smoke test in "Open follow-ups" above is the regression check.
+- **Never partial-rebuild.** `rebuildSnapshotsStreaming` starts UTXO age tracking from `inputs.creations[0].creationDate`. Loading only the trailing N days of creations causes every emitted snapshot to report LTH=0 because no UTXO appears old enough to clear the 155-day cohort boundary. `apps/indexer/src/rebuildSnapshots.ts` now throws if `fromDate > earliest-creation-in-DB`. If you ever genuinely need a "re-emit only the trailing window" feature, the right fix is to extend the engine with an explicit emit-from gate (load full creations, but skip-emit until cursor reaches the requested fromDate); don't paper over the guard.
 - **Railway service Root Directory must be empty (or `/`) for any service that depends on the repo-root `nixpacks.toml`.** Setting Root Directory to a subdirectory like `apps/indexer` causes Railway's nixpacks builder to skip the repo-root config (build log: `skipping 'nixpacks.toml' at 'nixpacks.toml' as it is not rooted at a valid path`), which then falls back to defaults (`nodejs_18` + `npm i`). `npm i` then fails on `workspace:*` protocol used by pnpm. Use **Config-as-Code Path** (e.g. `apps/indexer/railway.cron.json`) to point at the per-service config, not Root Directory. The `cohortsignal-mcp`, `cohortsignal-indexer`, and `cohortsignal-cron` services all use empty Root Directory + per-service Config-as-Code Path. The 2026-05-09 cron build failure traced back to this exact mistake.
 - For DB inspection, prefer the helper scripts in `apps/indexer/scripts/` over ad-hoc one-liners — they handle dotenv loading correctly.

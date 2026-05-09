@@ -62,6 +62,25 @@ export async function rebuildAllSnapshots(opts: RebuildOptions = {}): Promise<{
       `creations=${cBounds.min}..${cBounds.max} spends=${sBounds?.min ?? "—"}..${sBounds?.max ?? "—"}`,
   );
 
+  // Safety guard: a partial rebuild is fundamentally incorrect with the
+  // current engine. rebuildSnapshotsStreaming starts its UTXO age tracking
+  // from inputs.creations[0].creationDate, so passing only the trailing N
+  // days of creations causes every emitted snapshot to think the chain
+  // has zero history and report LTH=0. The 2026-05-09 cron run hit this
+  // and corrupted 61 days of cohort_snapshots. Refuse to proceed unless
+  // the rebuild starts from the earliest creation we have on file. To
+  // re-emit only a trailing window, the engine itself needs an explicit
+  // "skip emit until cursor >= fromDate" gate (currently it always emits
+  // from inputs.creations[0].creationDate forward).
+  if (fromDate > cBounds.min) {
+    throw new Error(
+      `rebuildAllSnapshots: refusing partial rebuild. fromDate=${fromDate} is later than the earliest ` +
+        `creation on file (${cBounds.min}). The deterministic engine starts UTXO age tracking from the ` +
+        `earliest creation in its input, so a partial rebuild would emit LTH=0 across the window. Either ` +
+        `omit --from to do a full rebuild, or extend the engine with an explicit emit-from gate.`,
+    );
+  }
+
   const runId = await startBootstrapRun(pool, {
     jobKind: "rpc-day", // reuse channel; rebuild is conceptually a same-data replay
     rangeStart: fromDate,
