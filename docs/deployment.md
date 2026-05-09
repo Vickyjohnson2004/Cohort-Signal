@@ -86,8 +86,7 @@ DROP TABLE utxo_daily_creations;
 The repo ships a per-service [`apps/mcp-server/railway.json`](../apps/mcp-server/railway.json) and a root-level [`nixpacks.toml`](../nixpacks.toml). The nixpacks config pins Node 20 and pnpm 9.12 via corepack and runs `pnpm install --frozen-lockfile`; the railway.json then builds the workspace and starts the server.
 
 1. **Create a service** in Railway from your GitHub repo.
-2. In Settings → **Root Directory**, set it to `apps/mcp-server`. Railway will auto-pick `apps/mcp-server/railway.json`. The build still has access to the full monorepo because pnpm is workspace-aware.
-   *Alternative*: leave Root Directory blank, then in Settings → Config-as-Code, set Path to `apps/mcp-server/railway.json`.
+2. Settings → **Root Directory**: leave **empty** (or set to `/`). Then Settings → **Config-as-Code Path**: `apps/mcp-server/railway.json`. This is the working pattern; an empty Root Directory keeps the repo-root `nixpacks.toml` in scope so the build uses Node 20 + pnpm 9.12 + `pnpm install --frozen-lockfile --prod=false` instead of nixpacks defaults (which are `nodejs_18` + `npm i`, and `npm i` fails on the workspace `workspace:*` protocol used by pnpm).
 3. **Watch path** (Settings → Deploy): `apps/mcp-server/**` and `packages/core/**` so this service redeploys when either changes.
 4. **Environment variables** (Settings → Variables):
    - `DATABASE_URL` — your Neon connection string (use the **direct** URL for writes; pooler URL is fine here for read-mostly traffic).
@@ -107,7 +106,7 @@ curl https://<your-railway-domain>/health
 ## 4. Deploy the indexer to Railway
 
 1. Add a **second service** in the same Railway project from the same repo.
-2. **Root Directory**: `apps/indexer` (so Railway picks `apps/indexer/railway.json`).
+2. Settings → **Root Directory**: leave **empty** (or set to `/`). Then Settings → **Config-as-Code Path**: `apps/indexer/railway.json`. (See the explanation in step 2 of "Deploy the MCP server to Railway" above for why empty Root Directory is required.)
 3. **Watch path**: `apps/indexer/**` and `packages/core/**`.
 4. **Environment variables** — same as the MCP server, plus:
    - **`GCP_SA_KEY_JSON`** — the entire JSON content of your service-account key, single-line (paste it into Railway as one variable; quoting is handled by the dashboard). The indexer's BigQuery client parses this directly and never writes the key to disk.
@@ -118,16 +117,17 @@ curl https://<your-railway-domain>/health
 
 ## 4b. Deploy the daily cron service to Railway
 
-The live worker only updates today's provisional snapshot. The historical floor (yesterday and earlier) needs the BigQuery extract + price refresh + deterministic rebuild loop, run once per day. The repo ships a wrapper script and a per-service Railway config for this.
+The live worker only updates today's provisional snapshot. The historical floor (yesterday and earlier) needs the BigQuery extract + price refresh + deterministic rebuild loop, run once per day. The repo ships a wrapper script (`apps/indexer/scripts/daily-update.sh`) and a per-service Railway config (`apps/indexer/railway.cron.json`) for this.
 
 1. Add a **third service** in the same Railway project from the same GitHub repo. Name it `cohortsignal-cron`.
-2. **Root Directory**: `apps/indexer` (so Railway resolves the script path correctly).
-3. Settings → **Config-as-Code Path**: `apps/indexer/railway.cron.json`.
-   This is the only thing that distinguishes the cron service from the live indexer service — same image, same env vars, different start command (`bash apps/indexer/scripts/daily-update.sh`) and `restartPolicyType: NEVER`.
-4. Settings → **Cron Schedule** (Railway's cron primitive): `0 6 * * *` (06:00 UTC daily).
-5. **Networking**: leave **public networking off**. This is a worker.
-6. **Environment variables**: same as the indexer service. Critically, `GCP_SA_KEY_JSON` is required because the cron job runs `bq-bootstrap`. Easiest: copy the indexer's variables across with Railway's "Copy from another service" feature.
-7. **Verify the script**: trigger a manual run from the Railway UI (Deployments → Trigger Deployment → "Run cron now"). You should see in the logs:
+2. Settings → **Source → Root Directory**: leave **empty** (or set to `/`).
+   Critical: do NOT set Root Directory to `apps/indexer` here, even though the cron config file lives there. When Root Directory is `apps/indexer`, Railway's nixpacks builder narrows its file search to that directory and stops seeing the repo-root `nixpacks.toml` (which pins Node 20 + pnpm 9.12 via corepack and runs `pnpm install --frozen-lockfile --prod=false`). Without `nixpacks.toml`, nixpacks falls back to defaults: `nodejs_18` + `npm i` against `apps/indexer/package.json`, which fails on the workspace protocol (`workspace:*`) that npm doesn't understand. Empty Root Directory keeps the repo-root `nixpacks.toml` in scope, the same way the existing `cohortsignal-mcp` and `cohortsignal-indexer` services build successfully.
+3. Settings → **Config-as-Code Path**: `apps/indexer/railway.cron.json` (without leading slash).
+4. Settings → **Watch Paths**: `apps/indexer/**`, `packages/core/**`.
+5. **Cron Schedule**: already set to `0 6 * * *` in `apps/indexer/railway.cron.json` via `deploy.cronSchedule`. No dashboard action needed.
+6. **Networking**: leave **public networking off**. This is a worker.
+7. **Environment variables**: same as the indexer service. Critically, `GCP_SA_KEY_JSON` is required because the cron job runs `bq-bootstrap`. Easiest: copy the indexer's variables across with Railway's "Copy from another service" feature.
+8. **Verify the script**: trigger a manual run from the Railway UI (Deployments → Trigger Deployment → "Run cron now"). You should see in the logs:
    ```
    [cron] daily-update.sh starting at <ISO timestamp>
    [cron] phase 1/3: bq-bootstrap ...
@@ -138,7 +138,7 @@ The live worker only updates today's provisional snapshot. The historical floor 
    [cron] daily-update.sh complete at <ISO timestamp>
    ```
    Total runtime ~1-2 minutes, exit code 0. Total BigQuery cost: well under free-tier daily limits (~150 MB scan per run vs the 1 TB/month cap).
-8. **Operational checks**: after the first scheduled run, verify the floor moved by reading `cohort_snapshots`:
+9. **Operational checks**: after the first scheduled run, verify the floor moved by reading `cohort_snapshots`:
    ```sql
    SELECT MAX(snapshot_date), provisional, COUNT(*)
    FROM cohort_snapshots WHERE cohort_boundary_days = 155
