@@ -4,7 +4,7 @@ This file is the **source of truth for any new Cursor / Codex / Claude
 session** working on this repository. Read it first; treat its contents as
 context to avoid re-discovering what's been built.
 
-> Last updated: 2026-05-09 (Optimization skill phase 6 — fixes shipped).
+> Last updated: 2026-05-10 (Optimization skill complete — all 8 phases closed).
 
 ---
 
@@ -240,7 +240,7 @@ HODL bands match Glassnode dashboard exactly (`under_1m`, `1m_3m`, `3m_6m`, `6m_
 | `cohort_snapshots` populated 2018-01-01 → today | ✅ — 3,048 rows |
 | MCP server with 8 tools + outputSchema + _meta | ✅ |
 | `createContextMiddleware()` wired in directly | ✅ |
-| Redis hot cache | ✅ (TTL: 60s for "now", 3600s for historical asOfDate) |
+| Redis hot cache | ✅ (TTL: 300s for "now", 3600s for historical asOfDate) |
 | Freshness / provisional / evidenceURL on every response | ✅ |
 | README + methodology + deployment docs | ✅ |
 | Push to GitHub (`Vickyjohnson2004/Cohort-Signal`, `main` branch) | ✅ |
@@ -250,7 +250,7 @@ HODL bands match Glassnode dashboard exactly (`under_1m`, `1m_3m`, `3m_6m`, `6m_
 | Multi-initialize smoke test (5x sequential `initialize` returns 200) | ✅ verified 2026-05-09 against production |
 | Context Protocol listing re-submitted | ✅ re-listed 2026-05-09 after per-session fix; in review |
 | Daily Cron service on Railway for incremental updates | ✅ deployed 2026-05-09; full-rebuild pipeline verified end-to-end (3,051 snapshots, 279 regime changes — exact match to canonical state). The original `--from 60d-ago` strategy was incorrect (the rebuild engine starts UTXO age tracking from `inputs.creations[0].creationDate`, so partial creations input emits LTH=0 across the window) — the cron now runs a full rebuild every day. |
-| Optimization skill run + tweaks applied | ⬜ pending listing approval + a few days of real Context traffic |
+| Optimization skill run + tweaks applied | ✅ all 8 phases complete 2026-05-10. 5 fixes shipped (Postgres N+1, classifier rule A0, parallelized SOPR reads, cache TTL 300s, latency-class honesty). Optimized listing description (3,769 chars) pushed via `ContextClient.developer.updateTool()` and verified byte-identical. Free-LLM baseline: 4 of 4 sampled prompts scored HIGH-tier differentiation. Full artifact at `optimization-artifact.json`. Review-request email draft at `docs/grants-review-email.md`. |
 
 ---
 

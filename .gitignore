@@ -41,3 +41,6 @@ dumps/
 
 # Optimization-skill working artifact (Tier-S grant submission, not for public repo)
 optimization-artifact.json
+
+# Private grant-correspondence drafts (keep local only)
+docs/grants-review-email.md
